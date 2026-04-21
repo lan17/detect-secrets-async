@@ -59,6 +59,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -82,7 +85,21 @@ jobs:
         run: uv sync --frozen
 
       - name: Run tests
-        run: uv run --frozen pytest --cov=detect_secrets_async --cov-report=term-missing
+        run: >-
+          uv run --frozen pytest --cov=detect_secrets_async
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+
+      - name: Upload coverage to Codecov
+        if: ${{ matrix.python-version == '3.11' }}
+        uses: codecov/codecov-action@v6
+        with:
+          use_oidc: true
+          files: ./coverage.xml
+          flags: unit
+          name: python-3.11
+          fail_ci_if_error: true
+          verbose: true
 
   build:
     runs-on: ubuntu-latest
