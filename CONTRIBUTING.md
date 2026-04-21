@@ -9,7 +9,7 @@
 ## CI coverage
 
 - GitHub Actions uploads `coverage.xml` from the Python 3.11 test job to Codecov to avoid duplicate reports from the full test matrix.
-- Maintainers need to connect the repository in Codecov and install the Codecov GitHub App so uploads surface as PR statuses and comments. The current workflow uses OIDC, so it does not require a `CODECOV_TOKEN` secret.
+- Maintainers need to connect the repository in Codecov, install the Codecov GitHub App so uploads surface as PR statuses and comments, and configure the `CODECOV_TOKEN` repository secret used by the upload step.
 
 ## Commit and PR conventions
 
