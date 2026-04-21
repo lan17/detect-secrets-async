@@ -1,0 +1,87 @@
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "detect-secrets-async"
+version = "0.0.0"
+description = "Async-friendly packaging scaffold for detect-secrets integrations."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+keywords = ["asyncio", "detect-secrets", "secrets-scanning"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/lan17/detect-secrets-async"
+Repository = "https://github.com/lan17/detect-secrets-async"
+Issues = "https://github.com/lan17/detect-secrets-async/issues"
+Releases = "https://github.com/lan17/detect-secrets-async/releases"
+
+[dependency-groups]
+dev = [
+  { include-group = "lint" },
+  { include-group = "typecheck" },
+  { include-group = "test" },
+]
+lint = [
+  "ruff>=0.11.8,<0.12",
+]
+typecheck = [
+  "mypy>=1.15.0,<2",
+]
+test = [
+  "pytest>=8.3.5,<9",
+  "pytest-cov>=6.1.1,<7",
+]
+release = [
+  "python-semantic-release>=10.5.3,<11",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+mypy_path = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.semantic_release]
+allow_zero_version = true
+build_command = """
+python -m pip install 'uv>=0.7,<0.8'
+uv lock --upgrade-package "$PACKAGE_NAME"
+git add uv.lock
+uv build --no-sources
+"""
+commit_message = "chore(release): {version}"
+tag_format = "v{version}"
+version_toml = ["pyproject.toml:project.version"]
+
+[tool.semantic_release.branches.main]
+match = "^main$"
+prerelease = false
+
+[tool.uv]
+default-groups = ["dev"]
