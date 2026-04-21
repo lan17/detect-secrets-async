@@ -1,5 +1,11 @@
 # detect-secrets-async
 
+[![CI](https://github.com/lan17/detect-secrets-async/actions/workflows/ci.yml/badge.svg)](https://github.com/lan17/detect-secrets-async/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/lan17/detect-secrets-async/branch/main/graph/badge.svg)](https://codecov.io/gh/lan17/detect-secrets-async)
+[![PyPI version](https://img.shields.io/pypi/v/detect-secrets-async.svg)](https://pypi.org/project/detect-secrets-async/)
+[![Python versions](https://img.shields.io/pypi/pyversions/detect-secrets-async.svg)](https://pypi.org/project/detect-secrets-async/)
+[![License](https://img.shields.io/github/license/lan17/detect-secrets-async.svg)](https://github.com/lan17/detect-secrets-async/blob/main/LICENSE)
+
 Async-first packaging and automation scaffold for integrating `detect-secrets` into service-oriented workflows.
 
 This repository is intentionally at bootstrap stage. The package, tests, CI, and release automation are in place; runtime functionality will land in follow-up PRs.
