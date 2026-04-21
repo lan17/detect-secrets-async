@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "detect-secrets-async"
-version = "0.0.0"
+version = "0.1.0"
 description = "Async-friendly packaging scaffold for detect-secrets integrations."
 readme = "README.md"
 requires-python = ">=3.11"
