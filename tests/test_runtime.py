@@ -129,7 +129,7 @@ async def test_runtime_runs_two_workers_in_parallel(
         tmp_path,
         """
         for line in sys.stdin:
-            time.sleep(0.2)
+            time.sleep(0.4)
             send({
                 "frame_type": "scan_result",
                 "result": {
@@ -140,16 +140,30 @@ async def test_runtime_runs_two_workers_in_parallel(
         """,
     )
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(script)))
-    runtime = get_runtime(RuntimeConfig(pool_size=2, max_queue_depth=4, max_requests_per_worker=10))
+    serial_runtime = get_runtime(
+        RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10)
+    )
 
     start = time.perf_counter()
     await asyncio.gather(
-        runtime.scan(_request("one", timeout_ms=1_000)),
-        runtime.scan(_request("two", timeout_ms=1_000)),
+        serial_runtime.scan(_request("one", timeout_ms=2_000)),
+        serial_runtime.scan(_request("two", timeout_ms=2_000)),
     )
-    elapsed = time.perf_counter() - start
+    serial_elapsed = time.perf_counter() - start
 
-    assert elapsed < 0.35
+    await shutdown_runtime()
+
+    parallel_runtime = get_runtime(
+        RuntimeConfig(pool_size=2, max_queue_depth=4, max_requests_per_worker=10)
+    )
+    start = time.perf_counter()
+    await asyncio.gather(
+        parallel_runtime.scan(_request("one", timeout_ms=2_000)),
+        parallel_runtime.scan(_request("two", timeout_ms=2_000)),
+    )
+    parallel_elapsed = time.perf_counter() - start
+
+    assert parallel_elapsed < serial_elapsed * 0.9
 
 
 @pytest.mark.asyncio
