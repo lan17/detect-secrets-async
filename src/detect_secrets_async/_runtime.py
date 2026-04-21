@@ -34,6 +34,7 @@ from ._models import (
 )
 
 LOGGER = logging.getLogger(__name__)
+# Keep shutdown and cancellation responsive even when a child process is slow to die.
 PROCESS_KILL_WAIT_SECONDS = 0.5
 THREAD_JOIN_TIMEOUT_SECONDS = 2.0
 CALLER_CANCELLATION_CLEANUP_WAIT_SECONDS = 1.0
@@ -110,26 +111,21 @@ class _WorkerSlot:
             raw_hello = await self._read_frame(
                 deadline,
                 eof_code=ScanFailureCode.WORKER_STARTUP_ERROR,
+                timeout_code=ScanFailureCode.WORKER_TIMEOUT,
             )
-            hello = WORKER_HELLO_ADAPTER.validate_json(raw_hello)
+            WORKER_HELLO_ADAPTER.validate_json(raw_hello)
         except ValidationError as exc:
             raise RuntimeScanError(ScanFailureCode.WORKER_PROTOCOL_ERROR) from exc
-
-        if hello.protocol_version != 1:
-            raise RuntimeScanError(ScanFailureCode.WORKER_PROTOCOL_ERROR)
 
     async def execute(self, request: ScanRequest, deadline: float) -> ScanResult:
         await self.ensure_started(deadline)
 
-        try:
-            payload = (
-                WorkerScanRequestFrame(request=request)
-                .model_dump_json(exclude_none=True)
-                .encode("utf-8")
-                + b"\n"
-            )
-        except ValidationError as exc:
-            raise RuntimeScanError(ScanFailureCode.INVALID_CONFIG) from exc
+        payload = (
+            WorkerScanRequestFrame(request=request)
+            .model_dump_json(exclude_none=True)
+            .encode("utf-8")
+            + b"\n"
+        )
 
         if len(payload) > MAX_FRAME_BYTES:
             raise RuntimeScanError(
@@ -151,7 +147,11 @@ class _WorkerSlot:
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise RuntimeScanError(ScanFailureCode.WORKER_CRASH) from exc
 
-        raw_response = await self._read_frame(deadline, eof_code=ScanFailureCode.WORKER_CRASH)
+        raw_response = await self._read_frame(
+            deadline,
+            eof_code=ScanFailureCode.WORKER_CRASH,
+            timeout_code=ScanFailureCode.WORKER_TIMEOUT,
+        )
         try:
             response = WORKER_RESPONSE_ADAPTER.validate_json(raw_response)
         except ValidationError as exc:
@@ -206,7 +206,13 @@ class _WorkerSlot:
                 process.stdin.close()
         self._close_transport(process)
 
-    async def _read_frame(self, deadline: float, *, eof_code: ScanFailureCode) -> bytes:
+    async def _read_frame(
+        self,
+        deadline: float,
+        *,
+        eof_code: ScanFailureCode,
+        timeout_code: ScanFailureCode,
+    ) -> bytes:
         process = self._require_process()
         stdout = process.stdout
         if stdout is None:
@@ -216,7 +222,7 @@ class _WorkerSlot:
             async with asyncio.timeout(self._remaining_seconds(deadline)):
                 frame = await stdout.readuntil(b"\n")
         except TimeoutError as exc:
-            raise RuntimeScanError(ScanFailureCode.WORKER_TIMEOUT) from exc
+            raise RuntimeScanError(timeout_code) from exc
         except asyncio.IncompleteReadError as exc:
             if exc.partial:
                 raise RuntimeScanError(ScanFailureCode.WORKER_PROTOCOL_ERROR) from exc
@@ -235,6 +241,7 @@ class _WorkerSlot:
         return self.process
 
     def _close_transport(self, process: asyncio.subprocess.Process) -> None:
+        # asyncio subprocess pipes can keep transports open after process exit; close explicitly.
         transport = getattr(process, "_transport", None)
         if transport is not None:
             transport.close()
@@ -385,7 +392,7 @@ class _RuntimeService:
 
             slot = pending.slot
 
-        if slot is not None and not pending.future.done():
+        if slot is not None:
             pending.abandon()
             self._reset_slot(slot, reason="caller cancellation")
 
@@ -415,12 +422,11 @@ class _RuntimeService:
                 self._reset_slot(slot, reason=exc.code.value)
             if not pending.future.done():
                 pending.future.set_exception(exc)
-        except Exception as exc:
+        except Exception:
             LOGGER.exception("unexpected runtime error in detect-secrets worker %s", slot.slot_id)
             self._reset_slot(slot, reason="unexpected runtime error")
             if not pending.future.done():
                 pending.future.set_exception(RuntimeScanError(ScanFailureCode.RUNTIME_ERROR))
-            raise exc
         finally:
             if recycle_after_completion:
                 self._reset_slot(slot, reason="max requests reached")
@@ -697,7 +703,7 @@ def configure_runtime(
     max_queue_depth: int | None = None,
     max_requests_per_worker: int | None = None,
 ) -> RuntimeConfig:
-    """Configure host-level runtime settings before first use."""
+    """Configure or confirm host-level runtime settings for the shared runtime."""
 
     resolved = resolve_runtime_config(
         config,
@@ -765,6 +771,7 @@ def _cleanup_runtime_at_exit() -> None:
     with _RUNTIME_LOCK:
         runtime = _RUNTIME
     if runtime is not None:
+        # atexit is synchronous, so interpreter shutdown falls back to best-effort child cleanup.
         runtime._close_nowait()
 
 

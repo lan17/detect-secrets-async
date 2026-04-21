@@ -33,7 +33,8 @@ def get_available_plugin_names() -> tuple[str, ...]:
 def get_default_plugin_names() -> tuple[str, ...]:
     """Return the plugin names used by the pinned upstream default settings."""
 
-    return get_available_plugin_names()
+    with default_settings() as settings:
+        return tuple(sorted(settings.plugins))
 
 
 def _build_plugin_settings(enabled_plugins: tuple[str, ...]) -> dict[str, Any]:

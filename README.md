@@ -13,6 +13,10 @@ run text scans with real timeouts and isolated per-request settings.
 The package is intentionally generic. It does not know anything about Agent Control, evaluator
 result mapping, payload normalization, or JSON Pointer metadata.
 
+Internally, the shared runtime owns one dedicated background event-loop thread per host process plus
+up to `pool_size` worker subprocesses. That extra thread is what lets the runtime stay safe across
+multiple caller event loops while keeping worker orchestration centralized.
+
 ## Scope
 
 V1 supports:
@@ -71,6 +75,7 @@ scan with `configure_runtime(...)` or `get_runtime(...)`, or through environment
 - `DETECT_SECRETS_ASYNC_MAX_REQUESTS_PER_WORKER` (default `100`)
 
 Conflicting re-initialization raises `RuntimeConfigConflictError`.
+Same-config calls are allowed and return or confirm the existing runtime settings.
 
 ```python
 from detect_secrets_async import RuntimeConfig, configure_runtime
@@ -78,10 +83,12 @@ from detect_secrets_async import RuntimeConfig, configure_runtime
 configure_runtime(RuntimeConfig(pool_size=8, max_queue_depth=32, max_requests_per_worker=200))
 ```
 
+`max_queue_depth=0` is valid and disables queueing beyond currently idle workers.
+
 ## Lifecycle Helpers
 
 - `get_runtime(...)` / `init_runtime(...)`: return the shared runtime
-- `configure_runtime(...)`: pin host-level settings before first use
+- `configure_runtime(...)`: pin or confirm host-level settings
 - `shutdown_runtime()`: async teardown for tests and long-lived hosts
 - `reset_runtime_for_tests()`: async reset helper
 - `get_runtime_info()`: package version, pinned `detect-secrets` version, and plugin metadata
@@ -119,6 +126,40 @@ Runtime failures raise `RuntimeScanError` with a safe `code`:
 - `worker_protocol_error`
 - `runtime_error`
 
+## Operational Notes
+
+- Workers start lazily. The first scan in a process pays cold-start cost for worker creation and
+  `detect-secrets` import.
+- If a host uses runtime introspection to validate plugin names ahead of scans, `detect-secrets`
+  must be importable in that validating process, not only inside a worker child.
+
+### Tuning
+
+- Repeated `queue_full`: raise `pool_size`, raise `max_queue_depth`, or reduce caller burstiness.
+- Repeated `queue_timeout`: raise `timeout_ms` or add worker/queue capacity.
+- Repeated `worker_timeout`: raise `timeout_ms`, narrow `enabled_plugins`, or reduce payload size.
+- Repeated `worker_startup_error`: verify the host can import both `detect_secrets_async` and
+  `detect-secrets`, and check Python environment consistency.
+
+## Benchmarking and Soak Runs
+
+Runtime defaults are intentionally conservative and should be re-checked on representative host
+hardware before changing them.
+
+```bash
+make benchmark
+make soak
+```
+
+Useful overrides:
+
+- `make benchmark BENCHMARK_ARGS="--pool-sizes 1 2 4 8 --pool-suite-requests 64"`
+- `make soak SOAK_ARGS="--duration-seconds 60 --max-requests-per-worker 5 --client-count 12"`
+
+`make benchmark` compares throughput and latency across pool sizes and recycle thresholds.
+`make soak` runs a sustained, non-CI stress pass that forces worker recycling and asserts that
+request bookkeeping and child processes drain cleanly on shutdown.
+
 ## Development
 
 ```bash
@@ -133,6 +174,8 @@ Available commands:
 - `make test`
 - `make build`
 - `make check`
+- `make benchmark`
+- `make soak`
 
 ## License
 

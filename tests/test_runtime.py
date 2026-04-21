@@ -23,13 +23,14 @@ from detect_secrets_async import (
     ScanConfig,
     ScanFailureCode,
     ScanRequest,
+    ScanResult,
     configure_runtime,
     get_runtime,
     get_runtime_info,
     shutdown_runtime,
 )
 from detect_secrets_async._config import resolve_runtime_config
-from detect_secrets_async._runtime import _RuntimeService, _WorkerSlot
+from detect_secrets_async._runtime import _PendingRequest, _RuntimeService, _WorkerSlot
 
 
 def _request(
@@ -723,6 +724,46 @@ async def test_caller_cancellation_kills_inflight_worker(
 
 
 @pytest.mark.asyncio
+async def test_caller_cancellation_abandons_finished_results_before_resetting_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: a started request whose result landed just before cancellation cleanup runs
+    service = _RuntimeService(
+        RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10)
+    )
+    slot = service._worker_slots[0]
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[ScanResult] = loop.create_future()
+    future.set_result(ScanResult(findings=(), detect_secrets_version="test-version"))
+    pending = _PendingRequest(
+        request=_request("one", timeout_ms=1_000),
+        future=future,
+        deadline=loop.time() + 1.0,
+    )
+    pending.mark_started(slot)
+    abandon_calls = 0
+    reset_reasons: list[str] = []
+
+    def record_abandon() -> None:
+        nonlocal abandon_calls
+        abandon_calls += 1
+
+    def record_reset(reset_slot: _WorkerSlot, *, reason: str) -> None:
+        assert reset_slot is slot
+        reset_reasons.append(reason)
+
+    monkeypatch.setattr(_PendingRequest, "abandon", lambda self: record_abandon())
+    monkeypatch.setattr(service, "_reset_slot", record_reset)
+
+    # When: caller cancellation cleanup runs after the result was already produced
+    await service._handle_caller_cancellation(pending)
+
+    # Then: cleanup still abandons the result and retires the slot
+    assert abandon_calls == 1
+    assert reset_reasons == ["caller cancellation"]
+
+
+@pytest.mark.asyncio
 async def test_worker_recycles_after_max_requests() -> None:
     # Given: a runtime configured to recycle workers after each request
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=1))
@@ -736,6 +777,46 @@ async def test_worker_recycles_after_max_requests() -> None:
     # Then: each request retires its worker after completion
     assert first_process is None
     assert second_process is None
+
+
+@pytest.mark.asyncio
+async def test_unexpected_worker_exceptions_are_sanitized_without_re_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: a job whose worker slot raises an unexpected exception
+    service = _RuntimeService(
+        RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10)
+    )
+    slot = service._worker_slots[0]
+    service._available_slots.clear()
+    loop = asyncio.get_running_loop()
+    pending = _PendingRequest(
+        request=_request("one", timeout_ms=1_000),
+        future=loop.create_future(),
+        deadline=loop.time() + 1.0,
+    )
+    pending.mark_started(slot)
+    reset_reasons: list[str] = []
+
+    async def raise_unexpected_error(_request: ScanRequest, _deadline: float) -> ScanResult:
+        raise RuntimeError("boom")
+
+    def record_reset(reset_slot: _WorkerSlot, *, reason: str) -> None:
+        assert reset_slot is slot
+        reset_reasons.append(reason)
+
+    monkeypatch.setattr(slot, "execute", raise_unexpected_error)
+    monkeypatch.setattr(service, "_reset_slot", record_reset)
+
+    # When: the runtime runs the job
+    await service._run_job(slot, pending)
+
+    # Then: the job surfaces a sanitized runtime error and finishes without re-raising
+    assert reset_reasons == ["unexpected runtime error"]
+    assert pending.future.done()
+    failure = pending.future.exception()
+    assert isinstance(failure, RuntimeScanError)
+    assert failure.code == ScanFailureCode.RUNTIME_ERROR
 
 
 @pytest.mark.asyncio
