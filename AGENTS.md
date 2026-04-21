@@ -10,7 +10,7 @@
 ## Testing style
 
 - Write tests in behavioral style.
-- Every test must include explicit `# GIVEN`, `# WHEN`, and `# THEN` comments.
+- Every test must include explicit `# Given: ...`, `# When: ...`, and `# Then: ...` comments.
 - Prefer assertions on externally visible behavior and safe failure codes.
 - Reach into internals only when the behavior under test is lifecycle/process management that the
   public API does not expose directly.

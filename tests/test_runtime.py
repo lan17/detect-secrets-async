@@ -119,15 +119,15 @@ async def _wait_for_process_exit(
 
 @pytest.mark.asyncio
 async def test_runtime_scans_content_with_default_plugins() -> None:
-    # GIVEN a shared runtime with the pinned default plugin set
+    # Given: a shared runtime with the pinned default plugin set
     runtime = get_runtime()
 
-    # WHEN scanning content that contains a GitHub token
+    # When: scanning content that contains a GitHub token
     result = await runtime.scan(
         _request("github_token = 'ghp_123456789012345678901234567890123456'")
     )
 
-    # THEN the runtime returns the expected finding and version metadata
+    # Then: the runtime returns the expected finding and version metadata
     assert result.detect_secrets_version == version("detect-secrets")
     assert [finding.type for finding in result.findings] == ["GitHub Token"]
     assert [finding.line_number for finding in result.findings] == [1]
@@ -135,15 +135,15 @@ async def test_runtime_scans_content_with_default_plugins() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_keeps_plugin_configs_isolated_between_requests() -> None:
-    # GIVEN one request with an explicit plugin subset and one with defaults
+    # Given: one request with an explicit plugin subset and one with defaults
     runtime = get_runtime()
     sample = "api_key = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDE='"
 
-    # WHEN both requests scan the same content sequentially
+    # When: both requests scan the same content sequentially
     github_only = await runtime.scan(_request(sample, enabled_plugins=("GitHubTokenDetector",)))
     default_plugins = await runtime.scan(_request(sample))
 
-    # THEN the explicit config does not bleed into the next request
+    # Then: the explicit config does not bleed into the next request
     assert github_only.findings == ()
     assert {finding.type for finding in default_plugins.findings} == {
         "Base64 High Entropy String",
@@ -153,10 +153,10 @@ async def test_runtime_keeps_plugin_configs_isolated_between_requests() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_rejects_unknown_plugins() -> None:
-    # GIVEN a scan request that names an unknown detect-secrets plugin
+    # Given: a scan request that names an unknown detect-secrets plugin
     runtime = get_runtime()
 
-    # WHEN the request is submitted
+    # When: the request is submitted
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(
             _request(
@@ -165,7 +165,7 @@ async def test_runtime_rejects_unknown_plugins() -> None:
             )
         )
 
-    # THEN the runtime surfaces a safe invalid-config error
+    # Then: the runtime surfaces a safe invalid-config error
     assert exc_info.value.code == ScanFailureCode.INVALID_CONFIG
 
 
@@ -174,7 +174,7 @@ async def test_runtime_runs_two_workers_in_parallel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a worker script whose request handling cost is large enough to measure
+    # Given: a worker script whose request handling cost is large enough to measure
     script = _write_fake_worker_script(
         tmp_path,
         """
@@ -194,7 +194,7 @@ async def test_runtime_runs_two_workers_in_parallel(
         RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10)
     )
 
-    # WHEN the same workload runs first with one worker and then with two workers
+    # When: the same workload runs first with one worker and then with two workers
     start = time.perf_counter()
     await asyncio.gather(
         serial_runtime.scan(_request("one", timeout_ms=2_000)),
@@ -214,7 +214,7 @@ async def test_runtime_runs_two_workers_in_parallel(
     )
     parallel_elapsed = time.perf_counter() - start
 
-    # THEN the two-worker runtime finishes materially faster than the one-worker runtime
+    # Then: the two-worker runtime finishes materially faster than the one-worker runtime
     assert parallel_elapsed < serial_elapsed * 0.9
 
 
@@ -223,7 +223,7 @@ async def test_queue_full_is_rejected_immediately(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a single-worker runtime with exactly one queued slot available
+    # Given: a single-worker runtime with exactly one queued slot available
     script = _write_fake_worker_script(
         tmp_path,
         """
@@ -245,11 +245,11 @@ async def test_queue_full_is_rejected_immediately(
     task_two = asyncio.create_task(runtime.scan(_request("two", timeout_ms=1_000)))
     await asyncio.sleep(0.05)
 
-    # WHEN a third request arrives while the queue is already saturated
+    # When: a third request arrives while the queue is already saturated
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(_request("three", timeout_ms=1_000))
 
-    # THEN the runtime rejects it with a queue-full error and drains request bookkeeping
+    # Then: the runtime rejects it with a queue-full error and drains request bookkeeping
     assert exc_info.value.code == ScanFailureCode.QUEUE_FULL
     await asyncio.gather(task_one, task_two)
     assert runtime._service is not None
@@ -261,7 +261,7 @@ async def test_timeout_while_waiting_for_worker_is_queue_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a single-worker runtime whose only worker is already occupied
+    # Given: a single-worker runtime whose only worker is already occupied
     script = _write_fake_worker_script(
         tmp_path,
         """
@@ -282,11 +282,11 @@ async def test_timeout_while_waiting_for_worker_is_queue_timeout(
     task_one = asyncio.create_task(runtime.scan(_request("one", timeout_ms=1_000)))
     await asyncio.sleep(0.05)
 
-    # WHEN a queued request expires before any worker becomes available
+    # When: a queued request expires before any worker becomes available
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(_request("two", timeout_ms=100))
 
-    # THEN the runtime reports a queue-timeout failure
+    # Then: the runtime reports a queue-timeout failure
     assert exc_info.value.code == ScanFailureCode.QUEUE_TIMEOUT
     await task_one
 
@@ -296,7 +296,7 @@ async def test_runtime_rejects_requests_that_exceed_the_protocol_frame_size(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a runtime whose protocol frame limit is smaller than the request payload
+    # Given: a runtime whose protocol frame limit is smaller than the request payload
     script = _write_fake_worker_script(
         tmp_path,
         """
@@ -314,11 +314,11 @@ async def test_runtime_rejects_requests_that_exceed_the_protocol_frame_size(
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(script)))
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
 
-    # WHEN the caller submits content that cannot fit in a request frame
+    # When: the caller submits content that cannot fit in a request frame
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(_request("x" * 512, timeout_ms=1_000))
 
-    # THEN the runtime rejects it with a safe runtime error before dispatching the request
+    # Then: the runtime rejects it with a safe runtime error before dispatching the request
     assert exc_info.value.code == ScanFailureCode.RUNTIME_ERROR
     assert "frame size limit" in str(exc_info.value)
 
@@ -328,7 +328,7 @@ async def test_runtime_rejects_worker_responses_that_exceed_the_protocol_frame_s
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a runtime whose protocol frame limit is smaller than the worker response
+    # Given: a runtime whose protocol frame limit is smaller than the worker response
     script = _write_fake_worker_script(
         tmp_path,
         """
@@ -347,11 +347,11 @@ async def test_runtime_rejects_worker_responses_that_exceed_the_protocol_frame_s
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(script)))
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
 
-    # WHEN the worker responds with an oversized frame
+    # When: the worker responds with an oversized frame
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(_request("one", timeout_ms=1_000))
 
-    # THEN the runtime treats it as a protocol error and retires the slot
+    # Then: the runtime treats it as a protocol error and retires the slot
     assert exc_info.value.code == ScanFailureCode.WORKER_PROTOCOL_ERROR
     assert _slot_process(runtime) is None
 
@@ -361,7 +361,7 @@ async def test_worker_timeout_kills_and_replaces_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a worker that will not answer before the request timeout
+    # Given: a worker that will not answer before the request timeout
     slow_script = _write_fake_worker_script(
         tmp_path,
         """
@@ -382,11 +382,11 @@ async def test_worker_timeout_kills_and_replaces_worker(
     scan_task = asyncio.create_task(runtime.scan(_request("one", timeout_ms=100)))
     process = await _wait_for_slot_process(runtime)
 
-    # WHEN the request times out and the runtime replaces the worker
+    # When: the request times out and the runtime replaces the worker
     with pytest.raises(RuntimeScanError) as exc_info:
         await scan_task
 
-    # THEN the old process is terminated within the cleanup budget and the slot can recover
+    # Then: the old process is terminated within the cleanup budget and the slot can recover
     assert exc_info.value.code == ScanFailureCode.WORKER_TIMEOUT
     await _wait_for_process_exit(process)
     assert process.returncode is not None
@@ -415,7 +415,7 @@ async def test_worker_crash_is_replaced(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a worker that exits abruptly while handling a request
+    # Given: a worker that exits abruptly while handling a request
     crash_script = _write_fake_worker_script(
         tmp_path,
         """
@@ -426,11 +426,11 @@ async def test_worker_crash_is_replaced(
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(crash_script)))
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
 
-    # WHEN the request is executed
+    # When: the request is executed
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(_request("one", timeout_ms=1_000))
 
-    # THEN the runtime reports a worker crash and clears the slot
+    # Then: the runtime reports a worker crash and clears the slot
     assert exc_info.value.code == ScanFailureCode.WORKER_CRASH
     assert _slot_process(runtime) is None
 
@@ -457,7 +457,7 @@ async def test_worker_protocol_error_is_replaced(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a worker that returns invalid protocol data
+    # Given: a worker that returns invalid protocol data
     protocol_script = _write_fake_worker_script(
         tmp_path,
         """
@@ -469,11 +469,11 @@ async def test_worker_protocol_error_is_replaced(
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(protocol_script)))
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
 
-    # WHEN the request is executed
+    # When: the request is executed
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(_request("one", timeout_ms=1_000))
 
-    # THEN the runtime reports a protocol error and clears the slot
+    # Then: the runtime reports a protocol error and clears the slot
     assert exc_info.value.code == ScanFailureCode.WORKER_PROTOCOL_ERROR
     assert _slot_process(runtime) is None
 
@@ -483,17 +483,17 @@ async def test_worker_startup_failure_is_sanitized(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a worker command that fails before sending its hello frame
+    # Given: a worker command that fails before sending its hello frame
     broken_script = tmp_path / "broken_worker.py"
     broken_script.write_text("raise RuntimeError('boom')\n", encoding="utf-8")
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(broken_script)))
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
 
-    # WHEN the runtime attempts to start the worker
+    # When: the runtime attempts to start the worker
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.scan(_request("one", timeout_ms=1_000))
 
-    # THEN it surfaces a sanitized startup failure
+    # Then: it surfaces a sanitized startup failure
     assert exc_info.value.code == ScanFailureCode.WORKER_STARTUP_ERROR
 
 
@@ -502,7 +502,7 @@ async def test_caller_cancellation_kills_inflight_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN an in-flight scan running on a slow worker
+    # Given: an in-flight scan running on a slow worker
     slow_script = _write_fake_worker_script(
         tmp_path,
         """
@@ -523,12 +523,12 @@ async def test_caller_cancellation_kills_inflight_worker(
     scan_task = asyncio.create_task(runtime.scan(_request("one", timeout_ms=5_000)))
     process = await _wait_for_slot_process(runtime)
 
-    # WHEN the caller cancels the request
+    # When: the caller cancels the request
     scan_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await scan_task
 
-    # THEN the assigned worker is terminated within the cleanup budget
+    # Then: the assigned worker is terminated within the cleanup budget
     await _wait_for_process_exit(process)
     assert process.returncode is not None
     assert _slot_process(runtime) is None
@@ -536,47 +536,47 @@ async def test_caller_cancellation_kills_inflight_worker(
 
 @pytest.mark.asyncio
 async def test_worker_recycles_after_max_requests() -> None:
-    # GIVEN a runtime configured to recycle workers after each request
+    # Given: a runtime configured to recycle workers after each request
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=1))
 
-    # WHEN the runtime serves two successful requests
+    # When: the runtime serves two successful requests
     await runtime.scan(_request("github_token = 'ghp_123456789012345678901234567890123456'"))
     first_process = _slot_process(runtime)
     await runtime.scan(_request("github_token = 'ghp_123456789012345678901234567890123456'"))
     second_process = _slot_process(runtime)
 
-    # THEN each request retires its worker after completion
+    # Then: each request retires its worker after completion
     assert first_process is None
     assert second_process is None
 
 
 @pytest.mark.asyncio
 async def test_shutdown_runtime_terminates_workers_deterministically() -> None:
-    # GIVEN a runtime with a live worker process
+    # Given: a runtime with a live worker process
     runtime = get_runtime()
     await runtime.scan(_request("github_token = 'ghp_123456789012345678901234567890123456'"))
     process = _slot_process(runtime)
     assert process is not None
 
-    # WHEN the shared runtime shuts down
+    # When: the shared runtime shuts down
     await shutdown_runtime()
 
-    # THEN the existing worker process has exited
+    # Then: the existing worker process has exited
     assert process.returncode is not None
 
 
 @pytest.mark.asyncio
 async def test_runtime_instance_shutdown_clears_singleton_reference() -> None:
-    # GIVEN an initialized singleton runtime
+    # Given: an initialized singleton runtime
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10))
 
-    # WHEN that instance is shut down directly
+    # When: that instance is shut down directly
     await runtime.shutdown()
     replacement = get_runtime(
         RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10)
     )
 
-    # THEN a later lookup returns a fresh runtime instance
+    # Then: a later lookup returns a fresh runtime instance
     assert replacement is not runtime
 
 
@@ -584,7 +584,7 @@ async def test_runtime_instance_shutdown_clears_singleton_reference() -> None:
 async def test_runtime_instance_shutdown_blocks_singleton_access_while_tearing_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a runtime whose shutdown coroutine is blocked mid-flight
+    # Given: a runtime whose shutdown coroutine is blocked mid-flight
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10))
     started = threading.Event()
     release = threading.Event()
@@ -599,14 +599,14 @@ async def test_runtime_instance_shutdown_blocks_singleton_access_while_tearing_d
     shutdown_task = asyncio.create_task(runtime.shutdown())
     assert await asyncio.to_thread(started.wait, 1.0)
 
-    # WHEN callers try to access or configure the singleton during teardown
+    # When: callers try to access or configure the singleton during teardown
     with pytest.raises(RuntimeScanError) as runtime_exc_info:
         get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10))
 
     with pytest.raises(RuntimeScanError) as configure_exc_info:
         configure_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10))
 
-    # THEN both entry points reject access until teardown finishes
+    # Then: both entry points reject access until teardown finishes
     assert runtime_exc_info.value.code == ScanFailureCode.RUNTIME_ERROR
     assert configure_exc_info.value.code == ScanFailureCode.RUNTIME_ERROR
 
@@ -618,7 +618,7 @@ async def test_runtime_instance_shutdown_blocks_singleton_access_while_tearing_d
 async def test_runtime_shutdown_raises_if_thread_does_not_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a runtime whose background thread ignores the shutdown join deadline
+    # Given: a runtime whose background thread ignores the shutdown join deadline
     runtime = DetectSecretsRuntime(
         RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10)
     )
@@ -639,11 +639,11 @@ async def test_runtime_shutdown_raises_if_thread_does_not_exit(
     asyncio.run_coroutine_threadsafe(linger_during_teardown(), runtime._loop)
     assert await asyncio.to_thread(started.wait, 1.0)
 
-    # WHEN shutdown waits for the runtime thread to stop
+    # When: shutdown waits for the runtime thread to stop
     with pytest.raises(RuntimeScanError) as exc_info:
         await runtime.shutdown()
 
-    # THEN shutdown reports a runtime error and leaves the thread alive for explicit cleanup
+    # Then: shutdown reports a runtime error and leaves the thread alive for explicit cleanup
     assert exc_info.value.code == ScanFailureCode.RUNTIME_ERROR
     assert runtime._thread is not None
     assert runtime._thread.is_alive()
@@ -657,7 +657,7 @@ async def test_runtime_shutdown_raises_if_thread_does_not_exit(
 async def test_shutdown_runtime_can_recover_after_prior_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN the shared runtime is stuck long enough for one shutdown attempt to time out
+    # Given: the shared runtime is stuck long enough for one shutdown attempt to time out
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10))
     started = threading.Event()
     release = threading.Event()
@@ -676,7 +676,7 @@ async def test_shutdown_runtime_can_recover_after_prior_timeout(
     asyncio.run_coroutine_threadsafe(linger_during_teardown(), runtime._loop)
     assert await asyncio.to_thread(started.wait, 1.0)
 
-    # WHEN shutdown fails once and then the stuck task is released
+    # When: shutdown fails once and then the stuck task is released
     with pytest.raises(RuntimeScanError):
         await shutdown_runtime()
 
@@ -688,7 +688,7 @@ async def test_shutdown_runtime_can_recover_after_prior_timeout(
         RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10)
     )
 
-    # THEN the shared singleton can be initialized again cleanly
+    # Then: the shared singleton can be initialized again cleanly
     assert replacement is not runtime
 
 
@@ -696,7 +696,7 @@ async def test_shutdown_runtime_can_recover_after_prior_timeout(
 async def test_shutdown_runtime_blocks_new_access_until_teardown_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN shared shutdown is blocked in the middle of service teardown
+    # Given: shared shutdown is blocked in the middle of service teardown
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10))
     started = threading.Event()
     release = threading.Event()
@@ -711,11 +711,11 @@ async def test_shutdown_runtime_blocks_new_access_until_teardown_finishes(
     shutdown_task = asyncio.create_task(shutdown_runtime())
     assert await asyncio.to_thread(started.wait, 1.0)
 
-    # WHEN another caller tries to acquire the singleton during shutdown
+    # When: another caller tries to acquire the singleton during shutdown
     with pytest.raises(RuntimeScanError) as exc_info:
         get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10))
 
-    # THEN the access is rejected until teardown completes
+    # Then: the access is rejected until teardown completes
     assert exc_info.value.code == ScanFailureCode.RUNTIME_ERROR
 
     release.set()
@@ -731,7 +731,7 @@ def test_runtime_supports_queued_scans_from_multiple_event_loops(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a single-worker runtime shared across separate event loops in different threads
+    # Given: a single-worker runtime shared across separate event loops in different threads
     script = _write_fake_worker_script(
         tmp_path,
         """
@@ -767,14 +767,14 @@ def test_runtime_supports_queued_scans_from_multiple_event_loops(
 
     threads = [threading.Thread(target=run_scan, args=(label,)) for label in ("one", "two")]
 
-    # WHEN both threads submit scans through different event loops
+    # When: both threads submit scans through different event loops
     for thread in threads:
         thread.start()
     start_barrier.wait()
     for thread in threads:
         thread.join()
 
-    # THEN both requests complete successfully through the shared runtime
+    # Then: both requests complete successfully through the shared runtime
     assert sorted(results) == [("one", None), ("two", None)]
 
 
@@ -782,7 +782,7 @@ def test_shutdown_runtime_is_safe_from_a_different_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN a scan running in one thread while shutdown runs from another event loop
+    # Given: a scan running in one thread while shutdown runs from another event loop
     script = _write_fake_worker_script(
         tmp_path,
         """
@@ -811,19 +811,19 @@ def test_shutdown_runtime_is_safe_from_a_different_event_loop(
 
     thread = threading.Thread(target=run_scan)
 
-    # WHEN shutdown is invoked from a different event loop
+    # When: shutdown is invoked from a different event loop
     thread.start()
     assert scan_started.wait(timeout=1.0)
     asyncio.run(shutdown_runtime())
     thread.join(timeout=1.0)
 
-    # THEN both loops unwind without leaving the worker thread running
+    # Then: both loops unwind without leaving the worker thread running
     assert not thread.is_alive()
 
 
 @pytest.mark.asyncio
 async def test_submit_does_not_build_coroutine_after_runtime_shutdown() -> None:
-    # GIVEN a runtime instance that has already been shut down
+    # Given: a runtime instance that has already been shut down
     runtime = DetectSecretsRuntime(
         RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10)
     )
@@ -838,17 +838,17 @@ async def test_submit_does_not_build_coroutine_after_runtime_shutdown() -> None:
         factory_called = True
         return fake_scan()
 
-    # WHEN _submit is called after shutdown
+    # When: _submit is called after shutdown
     with pytest.raises(RuntimeScanError) as exc_info:
         runtime._submit(build_coroutine)
 
-    # THEN it fails without even creating the coroutine object
+    # Then: it fails without even creating the coroutine object
     assert exc_info.value.code == ScanFailureCode.RUNTIME_ERROR
     assert not factory_called
 
 
 def test_submit_holds_thread_lock_while_scheduling(monkeypatch: pytest.MonkeyPatch) -> None:
-    # GIVEN a runtime instance and a stubbed run_coroutine_threadsafe implementation
+    # Given: a runtime instance and a stubbed run_coroutine_threadsafe implementation
     runtime = DetectSecretsRuntime(
         RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=10)
     )
@@ -868,20 +868,20 @@ def test_submit_holds_thread_lock_while_scheduling(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
 
-    # WHEN the runtime submits work onto its background loop
+    # When: the runtime submits work onto its background loop
     future = runtime._submit(fake_scan)
 
-    # THEN scheduling happens while the thread lock is still held
+    # Then: scheduling happens while the thread lock is still held
     assert future is submitted
     runtime._close_nowait()
 
 
 def test_singleton_runtime_conflict_raises() -> None:
-    # GIVEN the singleton runtime is already configured with one host-level config
+    # Given: the singleton runtime is already configured with one host-level config
     configure_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=5))
 
-    # WHEN a caller requests a conflicting configuration
-    # THEN the singleton refuses the conflicting init
+    # When: a caller requests a conflicting configuration
+    # Then: the singleton refuses the conflicting init
     with pytest.raises(RuntimeConfigConflictError):
         get_runtime(RuntimeConfig(pool_size=2, max_queue_depth=4, max_requests_per_worker=5))
 
@@ -896,9 +896,9 @@ def test_singleton_runtime_conflict_raises() -> None:
     ],
 )
 def test_explicit_runtime_overrides_are_validated(field_name: str, value: int) -> None:
-    # GIVEN an invalid explicit runtime override value
-    # WHEN resolve_runtime_config validates the explicit override
-    # THEN pydantic rejects the invalid value
+    # Given: an invalid explicit runtime override value
+    # When: resolve_runtime_config validates the explicit override
+    # Then: pydantic rejects the invalid value
     with pytest.raises(ValidationError):
         if field_name == "pool_size":
             resolve_runtime_config(pool_size=value)
@@ -909,11 +909,11 @@ def test_explicit_runtime_overrides_are_validated(field_name: str, value: int) -
 
 
 def test_env_runtime_overrides_are_validated(monkeypatch: pytest.MonkeyPatch) -> None:
-    # GIVEN an invalid environment-backed runtime setting
+    # Given: an invalid environment-backed runtime setting
     monkeypatch.setenv("DETECT_SECRETS_ASYNC_POOL_SIZE", "abc")
 
-    # WHEN runtime config is resolved from the environment
-    # THEN validation fails
+    # When: runtime config is resolved from the environment
+    # Then: validation fails
     with pytest.raises(ValidationError):
         resolve_runtime_config()
 
@@ -921,19 +921,19 @@ def test_env_runtime_overrides_are_validated(monkeypatch: pytest.MonkeyPatch) ->
 def test_env_runtime_overrides_initialize_the_singleton_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # GIVEN valid runtime settings in the environment
+    # Given: valid runtime settings in the environment
     monkeypatch.setenv("DETECT_SECRETS_ASYNC_POOL_SIZE", "2")
     monkeypatch.setenv("DETECT_SECRETS_ASYNC_MAX_QUEUE_DEPTH", "3")
     monkeypatch.setenv("DETECT_SECRETS_ASYNC_MAX_REQUESTS_PER_WORKER", "4")
 
-    # WHEN the shared runtime is initialized without explicit overrides
+    # When: the shared runtime is initialized without explicit overrides
     runtime = get_runtime()
     replacement = get_runtime(
         RuntimeConfig(pool_size=2, max_queue_depth=3, max_requests_per_worker=4)
     )
     info = get_runtime_info()
 
-    # THEN the singleton uses the env-backed config and same-config reinit returns the same instance
+    # Then: the singleton uses the env-backed config and reuses same-config init
     assert runtime.config == RuntimeConfig(
         pool_size=2,
         max_queue_depth=3,
@@ -944,11 +944,11 @@ def test_env_runtime_overrides_initialize_the_singleton_runtime(
 
 
 def test_runtime_info_exposes_pinned_detect_secrets_version() -> None:
-    # GIVEN the installed runtime package metadata
+    # Given: the installed runtime package metadata
     info = get_runtime_info()
 
-    # WHEN static runtime info is requested without scanning
-    # THEN it reports the pinned detect-secrets version and plugin inventory
+    # When: static runtime info is requested without scanning
+    # Then: it reports the pinned detect-secrets version and plugin inventory
     assert info.detect_secrets_version == version("detect-secrets")
     assert "GitHubTokenDetector" in info.available_plugin_names
     assert info.default_plugin_names == info.available_plugin_names
