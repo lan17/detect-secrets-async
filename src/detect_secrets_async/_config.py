@@ -31,7 +31,7 @@ class RuntimeConfig(BaseModel):
             raw_value = os.getenv(env_name)
             if raw_value is None:
                 continue
-            data[field_name] = int(raw_value)
+            data[field_name] = raw_value
 
         return cls(**data)
 
@@ -66,4 +66,4 @@ def resolve_runtime_config(
     if not updates:
         return base
 
-    return base.model_copy(update=updates)
+    return RuntimeConfig.model_validate({**base.model_dump(), **updates})

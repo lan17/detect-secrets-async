@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import concurrent.futures
+import itertools
 import logging
 import sys
 import threading
 from collections import deque
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
+from typing import TypeVar
 
 from pydantic import ValidationError
 
@@ -31,10 +35,14 @@ from ._models import (
 
 LOGGER = logging.getLogger(__name__)
 PROCESS_KILL_WAIT_SECONDS = 0.5
+THREAD_JOIN_TIMEOUT_SECONDS = 2.0
+CALLER_CANCELLATION_CLEANUP_WAIT_SECONDS = 1.0
 
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIME: DetectSecretsRuntime | None = None
 _CONFIG: RuntimeConfig | None = None
+_SHUTTING_DOWN = False
+_T = TypeVar("_T")
 
 
 def _package_version() -> str:
@@ -173,9 +181,13 @@ class _WorkerSlot:
         self.requests_served = 0
         if process is None:
             return
+        if process.stdin is not None:
+            with suppress(BrokenPipeError):
+                process.stdin.close()
         if process.returncode is None:
             with suppress(ProcessLookupError):
                 process.kill()
+        self._close_transport(process)
 
     async def _terminate_process(
         self,
@@ -192,6 +204,7 @@ class _WorkerSlot:
         if process.stdin is not None:
             with suppress(BrokenPipeError):
                 process.stdin.close()
+        self._close_transport(process)
 
     async def _read_frame(self, deadline: float, *, eof_code: ScanFailureCode) -> bytes:
         process = self._require_process()
@@ -221,9 +234,14 @@ class _WorkerSlot:
             raise RuntimeScanError(ScanFailureCode.WORKER_CRASH)
         return self.process
 
+    def _close_transport(self, process: asyncio.subprocess.Process) -> None:
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            transport.close()
 
-class DetectSecretsRuntime:
-    """Async facade over a bounded pool of detect-secrets subprocess workers."""
+
+class _RuntimeService:
+    """Single-loop runtime implementation hosted on the background event loop."""
 
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
@@ -232,10 +250,11 @@ class DetectSecretsRuntime:
         self._worker_slots = tuple(_WorkerSlot(slot_id=index) for index in range(config.pool_size))
         self._available_slots: deque[_WorkerSlot] = deque(self._worker_slots)
         self._pending_requests: deque[_PendingRequest] = deque()
+        self._requests_by_id: dict[int, _PendingRequest] = {}
         self._job_tasks: set[asyncio.Task[None]] = set()
         self._background_tasks: set[asyncio.Task[None]] = set()
 
-    async def scan(self, request: ScanRequest) -> ScanResult:
+    async def scan(self, request_id: int, request: ScanRequest) -> ScanResult:
         deadline = asyncio.get_running_loop().time() + (request.timeout_ms / 1000)
         pending = _PendingRequest(
             request=request,
@@ -246,12 +265,14 @@ class DetectSecretsRuntime:
         async with self._state_lock:
             self._ensure_open()
             if self._available_slots and not self._pending_requests:
+                self._requests_by_id[request_id] = pending
                 slot = self._available_slots.popleft()
                 pending.mark_started(slot)
                 self._schedule_job(slot, pending)
             else:
                 if len(self._pending_requests) >= self.config.max_queue_depth:
                     raise RuntimeScanError(ScanFailureCode.QUEUE_FULL)
+                self._requests_by_id[request_id] = pending
                 self._pending_requests.append(pending)
 
         try:
@@ -265,6 +286,42 @@ class DetectSecretsRuntime:
         except asyncio.CancelledError:
             await self._handle_caller_cancellation(pending)
             raise
+        finally:
+            async with self._state_lock:
+                self._requests_by_id.pop(request_id, None)
+
+    async def cancel(self, request_id: int) -> None:
+        async with self._state_lock:
+            pending = self._requests_by_id.get(request_id)
+            if pending is None:
+                return
+
+            if not pending.started:
+                with suppress(ValueError):
+                    self._pending_requests.remove(pending)
+                self._requests_by_id.pop(request_id, None)
+                if not pending.future.done():
+                    pending.future.set_exception(
+                        RuntimeScanError(
+                            ScanFailureCode.RUNTIME_ERROR,
+                            "request cancelled by caller",
+                        )
+                    )
+                return
+
+            slot = pending.slot
+            self._requests_by_id.pop(request_id, None)
+            if not pending.future.done():
+                pending.future.set_exception(
+                    RuntimeScanError(
+                        ScanFailureCode.RUNTIME_ERROR,
+                        "request cancelled by caller",
+                    )
+                )
+
+        if slot is not None:
+            pending.abandon()
+            self._reset_slot(slot, reason="caller cancellation")
 
     async def shutdown(self) -> None:
         async with self._state_lock:
@@ -301,15 +358,6 @@ class DetectSecretsRuntime:
         self._closed = True
         for slot in self._worker_slots:
             slot.kill_nowait()
-
-    def info(self) -> RuntimeInfo:
-        return RuntimeInfo(
-            package_version=_package_version(),
-            detect_secrets_version=get_detect_secrets_version(),
-            available_plugin_names=get_available_plugin_names(),
-            default_plugin_names=get_default_plugin_names(),
-            configured_runtime=self.config,
-        )
 
     async def _handle_wait_expiry(self, pending: _PendingRequest) -> RuntimeScanError:
         async with self._state_lock:
@@ -388,9 +436,16 @@ class DetectSecretsRuntime:
             if self._closed:
                 return
 
+            loop = asyncio.get_running_loop()
             while self._pending_requests:
                 next_pending = self._pending_requests.popleft()
                 if next_pending.future.done():
+                    continue
+                if next_pending.deadline <= loop.time():
+                    next_pending.future.set_exception(
+                        RuntimeScanError(ScanFailureCode.QUEUE_TIMEOUT)
+                    )
+                    next_pending.abandon()
                     continue
                 next_pending.mark_started(slot)
                 self._schedule_job(slot, next_pending)
@@ -404,6 +459,186 @@ class DetectSecretsRuntime:
                 ScanFailureCode.RUNTIME_ERROR,
                 "runtime is shut down",
             )
+
+
+class DetectSecretsRuntime:
+    """Thread-safe async facade over a dedicated runtime event loop."""
+
+    def __init__(self, config: RuntimeConfig) -> None:
+        self.config = config
+        self._thread_lock = threading.Lock()
+        self._request_ids = itertools.count()
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._service: _RuntimeService | None = None
+        self._started = threading.Event()
+        self._startup_error: BaseException | None = None
+        self._closed = False
+        self._start_loop_thread()
+
+    async def scan(self, request: ScanRequest) -> ScanResult:
+        request_id = next(self._request_ids)
+        service = self._get_service()
+        future = self._submit(lambda: service.scan(request_id, request))
+        wrapped = asyncio.wrap_future(future)
+        try:
+            return await wrapped
+        except asyncio.CancelledError:
+            with suppress(
+                asyncio.CancelledError,
+                concurrent.futures.CancelledError,
+                RuntimeScanError,
+                TimeoutError,
+            ):
+                await asyncio.wait_for(
+                    asyncio.wrap_future(
+                        self._submit(lambda: service.cancel(request_id)),
+                    ),
+                    timeout=CALLER_CANCELLATION_CLEANUP_WAIT_SECONDS,
+                )
+            with suppress(
+                asyncio.CancelledError,
+                concurrent.futures.CancelledError,
+                RuntimeScanError,
+                TimeoutError,
+            ):
+                await asyncio.wait_for(
+                    asyncio.wrap_future(future),
+                    timeout=CALLER_CANCELLATION_CLEANUP_WAIT_SECONDS,
+                )
+            raise
+
+    async def shutdown(self) -> None:
+        _mark_global_runtime_shutting_down(self)
+        thread = self._thread
+        loop = self._loop
+        service = self._service
+        if thread is None or loop is None or service is None:
+            with self._thread_lock:
+                self._closed = True
+            _clear_global_runtime_reference(self)
+            return
+
+        if not thread.is_alive() or loop.is_closed():
+            with self._thread_lock:
+                self._closed = True
+            self._clear_thread_state()
+            _clear_global_runtime_reference(self)
+            return
+
+        with self._thread_lock:
+            self._closed = True
+
+        future = asyncio.run_coroutine_threadsafe(service.shutdown(), loop)
+        await asyncio.wrap_future(future)
+        loop.call_soon_threadsafe(loop.stop)
+        await asyncio.to_thread(thread.join, THREAD_JOIN_TIMEOUT_SECONDS)
+        if thread.is_alive():
+            raise RuntimeScanError(ScanFailureCode.RUNTIME_ERROR, "runtime thread did not stop")
+        self._clear_thread_state()
+        _clear_global_runtime_reference(self)
+
+    def _close_nowait(self) -> None:
+        _mark_global_runtime_shutting_down(self)
+        with self._thread_lock:
+            self._closed = True
+            loop = self._loop
+            service = self._service
+            thread = self._thread
+
+        if loop is not None and service is not None:
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(service.close_nowait)
+                loop.call_soon_threadsafe(loop.stop)
+
+        if thread is not None:
+            self._clear_thread_state()
+        _clear_global_runtime_reference(self)
+
+    def info(self) -> RuntimeInfo:
+        return RuntimeInfo(
+            package_version=_package_version(),
+            detect_secrets_version=get_detect_secrets_version(),
+            available_plugin_names=get_available_plugin_names(),
+            default_plugin_names=get_default_plugin_names(),
+            configured_runtime=self.config,
+        )
+
+    def _get_service(self) -> _RuntimeService:
+        service = self._service
+        if service is None:
+            raise RuntimeScanError(ScanFailureCode.RUNTIME_ERROR, "runtime failed to initialize")
+        return service
+
+    def _submit(
+        self,
+        coroutine_factory: Callable[[], Coroutine[object, object, _T]],
+    ) -> concurrent.futures.Future[_T]:
+        with self._thread_lock:
+            loop = self._loop
+            if self._closed or loop is None:
+                raise RuntimeScanError(ScanFailureCode.RUNTIME_ERROR, "runtime is shut down")
+            coroutine = coroutine_factory()
+            try:
+                return asyncio.run_coroutine_threadsafe(coroutine, loop)
+            except Exception:
+                coroutine.close()
+                raise
+
+    def _start_loop_thread(self) -> None:
+        with self._thread_lock:
+            if self._closed:
+                raise RuntimeScanError(ScanFailureCode.RUNTIME_ERROR, "runtime is shut down")
+            if self._thread is not None and self._thread.is_alive():
+                return
+
+            self._started.clear()
+            self._startup_error = None
+            thread = threading.Thread(
+                target=self._thread_main,
+                name="detect-secrets-async-runtime",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+
+        self._started.wait()
+        if self._startup_error is not None:
+            raise RuntimeScanError(ScanFailureCode.RUNTIME_ERROR) from self._startup_error
+
+    def _thread_main(self) -> None:
+        loop = asyncio.new_event_loop()
+        service: _RuntimeService | None = None
+        asyncio.set_event_loop(loop)
+        try:
+            service = _RuntimeService(self.config)
+            with self._thread_lock:
+                self._loop = loop
+                self._service = service
+            self._started.set()
+            loop.run_forever()
+        except BaseException as exc:  # pragma: no cover - startup failures are hard to force safely
+            self._startup_error = exc
+            self._started.set()
+            raise
+        finally:
+            service = self._service
+            if service is not None:
+                service.close_nowait()
+
+            pending_tasks = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending_tasks:
+                task.cancel()
+            if pending_tasks:
+                loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
+    def _clear_thread_state(self) -> None:
+        with self._thread_lock:
+            self._loop = None
+            self._service = None
+            self._thread = None
 
 
 def get_runtime(
@@ -423,6 +658,8 @@ def get_runtime(
     )
     global _CONFIG, _RUNTIME
     with _RUNTIME_LOCK:
+        if _SHUTTING_DOWN:
+            raise RuntimeScanError(ScanFailureCode.RUNTIME_ERROR, "runtime is shutting down")
         if _CONFIG is None:
             _CONFIG = resolved
         elif resolved != _CONFIG:
@@ -470,6 +707,8 @@ def configure_runtime(
     )
     global _CONFIG
     with _RUNTIME_LOCK:
+        if _SHUTTING_DOWN:
+            raise RuntimeScanError(ScanFailureCode.RUNTIME_ERROR, "runtime is shutting down")
         if _CONFIG is None:
             _CONFIG = resolved
         elif resolved != _CONFIG:
@@ -482,14 +721,24 @@ def configure_runtime(
 async def shutdown_runtime() -> None:
     """Shutdown and clear the shared runtime instance."""
 
-    global _CONFIG, _RUNTIME
+    global _CONFIG, _RUNTIME, _SHUTTING_DOWN
     with _RUNTIME_LOCK:
         runtime = _RUNTIME
-        _RUNTIME = None
-        _CONFIG = None
+        _SHUTTING_DOWN = runtime is not None
 
-    if runtime is not None:
-        await runtime.shutdown()
+    shutdown_succeeded = runtime is None
+    try:
+        if runtime is not None:
+            await runtime.shutdown()
+            shutdown_succeeded = True
+    finally:
+        with _RUNTIME_LOCK:
+            if shutdown_succeeded and _RUNTIME is runtime:
+                _RUNTIME = None
+                _CONFIG = None
+                _SHUTTING_DOWN = False
+            elif runtime is None:
+                _SHUTTING_DOWN = False
 
 
 async def reset_runtime_for_tests() -> None:
@@ -516,7 +765,23 @@ def _cleanup_runtime_at_exit() -> None:
     with _RUNTIME_LOCK:
         runtime = _RUNTIME
     if runtime is not None:
-        runtime.close_nowait()
+        runtime._close_nowait()
+
+
+def _clear_global_runtime_reference(runtime: DetectSecretsRuntime) -> None:
+    global _CONFIG, _RUNTIME, _SHUTTING_DOWN
+    with _RUNTIME_LOCK:
+        if _RUNTIME is runtime:
+            _RUNTIME = None
+            _CONFIG = None
+            _SHUTTING_DOWN = False
+
+
+def _mark_global_runtime_shutting_down(runtime: DetectSecretsRuntime) -> None:
+    global _SHUTTING_DOWN
+    with _RUNTIME_LOCK:
+        if _RUNTIME is runtime:
+            _SHUTTING_DOWN = True
 
 
 atexit.register(_cleanup_runtime_at_exit)
