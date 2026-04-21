@@ -48,6 +48,17 @@ def _request(
 def _write_fake_worker_script(tmp_path: Path, body: str) -> Path:
     script = tmp_path / "fake_worker.py"
     body_block = textwrap.dedent(body).strip()
+    hello_block = textwrap.dedent(
+        """
+        send({
+            "frame_type": "hello",
+            "protocol_version": 1,
+            "detect_secrets_version": "fake-1.0.0",
+            "available_plugin_names": ["FakeDetector"],
+            "default_plugin_names": ["FakeDetector"],
+        })
+        """
+    ).strip()
     script.write_text(
         "\n".join(
             [
@@ -60,13 +71,39 @@ def _write_fake_worker_script(tmp_path: Path, body: str) -> Path:
                 '    sys.stdout.write(json.dumps(payload) + "\\n")',
                 "    sys.stdout.flush()",
                 "",
-                "send({",
-                '    "frame_type": "hello",',
-                '    "protocol_version": 1,',
-                '    "detect_secrets_version": "fake-1.0.0",',
-                '    "available_plugin_names": ["FakeDetector"],',
-                '    "default_plugin_names": ["FakeDetector"],',
-                "})",
+                hello_block,
+                "",
+                body_block,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return script
+
+
+def _write_custom_startup_worker_script(
+    tmp_path: Path,
+    *,
+    hello_block: str,
+    body: str = "time.sleep(1.0)",
+) -> Path:
+    script = tmp_path / "fake_worker.py"
+    hello_script = textwrap.dedent(hello_block).strip()
+    body_block = textwrap.dedent(body).strip()
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "import sys",
+                "import time",
+                "",
+                "def send(payload):",
+                '    sys.stdout.write(json.dumps(payload) + "\\n")',
+                "    sys.stdout.flush()",
+                "",
+                hello_script,
                 "",
                 body_block,
                 "",
@@ -131,6 +168,26 @@ async def test_runtime_scans_content_with_default_plugins() -> None:
     assert result.detect_secrets_version == version("detect-secrets")
     assert [finding.type for finding in result.findings] == ["GitHub Token"]
     assert [finding.line_number for finding in result.findings] == [1]
+
+
+@pytest.mark.asyncio
+async def test_runtime_preserves_line_numbers_for_multiline_content() -> None:
+    # Given: multiline content with a GitHub token only on the third line
+    runtime = get_runtime()
+    content = "\n".join(
+        [
+            "first line",
+            "second line",
+            "github_token = 'ghp_123456789012345678901234567890123456'",
+        ]
+    )
+
+    # When: the content is scanned through the shared runtime
+    result = await runtime.scan(_request(content, enabled_plugins=("GitHubTokenDetector",)))
+
+    # Then: the finding keeps the original source line number
+    assert [finding.type for finding in result.findings] == ["GitHub Token"]
+    assert [finding.line_number for finding in result.findings] == [3]
 
 
 @pytest.mark.asyncio
@@ -495,6 +552,137 @@ async def test_worker_startup_failure_is_sanitized(
 
     # Then: it surfaces a sanitized startup failure
     assert exc_info.value.code == ScanFailureCode.WORKER_STARTUP_ERROR
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_timeout_kills_and_replaces_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: a worker whose hello frame does not arrive before the request deadline
+    slow_start_script = _write_custom_startup_worker_script(
+        tmp_path,
+        hello_block="""
+        time.sleep(1.0)
+        send({
+            "frame_type": "hello",
+            "protocol_version": 1,
+            "detect_secrets_version": "fake-1.0.0",
+            "available_plugin_names": ["FakeDetector"],
+            "default_plugin_names": ["FakeDetector"],
+        })
+        """,
+        body="""
+        for line in sys.stdin:
+            send({
+                "frame_type": "scan_result",
+                "result": {
+                    "findings": [],
+                    "detect_secrets_version": "fake-1.0.0",
+                },
+            })
+        """,
+    )
+    _patch_worker_command(monkeypatch, lambda: (sys.executable, str(slow_start_script)))
+    runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
+
+    scan_task = asyncio.create_task(runtime.scan(_request("one", timeout_ms=100)))
+    process = await _wait_for_slot_process(runtime)
+
+    # When: the startup handshake exceeds the end-to-end timeout budget
+    with pytest.raises(RuntimeScanError) as exc_info:
+        await scan_task
+
+    # Then: the runtime times out the startup path, kills the process, and can recover
+    assert exc_info.value.code == ScanFailureCode.WORKER_TIMEOUT
+    await _wait_for_process_exit(process)
+    assert process.returncode is not None
+    assert _slot_process(runtime) is None
+
+    fast_script = _write_fake_worker_script(
+        tmp_path,
+        """
+        for line in sys.stdin:
+            send({
+                "frame_type": "scan_result",
+                "result": {
+                    "findings": [],
+                    "detect_secrets_version": "fake-1.0.0",
+                },
+            })
+        """,
+    )
+    _patch_worker_command(monkeypatch, lambda: (sys.executable, str(fast_script)))
+    result = await runtime.scan(_request("two", timeout_ms=1_000))
+    assert result.findings == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hello_block", "startup_name"),
+    [
+        (
+            """
+            sys.stdout.write("not-json\\n")
+            sys.stdout.flush()
+            time.sleep(1.0)
+            """,
+            "invalid hello payload",
+        ),
+        (
+            """
+            send({
+                "frame_type": "hello",
+                "protocol_version": 2,
+                "detect_secrets_version": "fake-1.0.0",
+                "available_plugin_names": ["FakeDetector"],
+                "default_plugin_names": ["FakeDetector"],
+            })
+            time.sleep(1.0)
+            """,
+            "wrong protocol version",
+        ),
+    ],
+    ids=["invalid-hello-json", "wrong-hello-version"],
+)
+async def test_worker_startup_protocol_failures_reset_and_recover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hello_block: str,
+    startup_name: str,
+) -> None:
+    # Given: a worker that violates the startup handshake protocol
+    bad_start_script = _write_custom_startup_worker_script(
+        tmp_path,
+        hello_block=hello_block,
+    )
+    _patch_worker_command(monkeypatch, lambda: (sys.executable, str(bad_start_script)))
+    runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
+
+    # When: the runtime tries to initialize the worker with the invalid hello behavior
+    with pytest.raises(RuntimeScanError) as exc_info:
+        await runtime.scan(_request(startup_name, timeout_ms=1_000))
+
+    # Then: the startup protocol failure is surfaced safely and the slot can recover
+    assert exc_info.value.code == ScanFailureCode.WORKER_PROTOCOL_ERROR
+    assert _slot_process(runtime) is None
+
+    fast_script = _write_fake_worker_script(
+        tmp_path,
+        """
+        for line in sys.stdin:
+            send({
+                "frame_type": "scan_result",
+                "result": {
+                    "findings": [],
+                    "detect_secrets_version": "fake-1.0.0",
+                },
+            })
+        """,
+    )
+    _patch_worker_command(monkeypatch, lambda: (sys.executable, str(fast_script)))
+    result = await runtime.scan(_request("recovered", timeout_ms=1_000))
+    assert result.findings == ()
 
 
 @pytest.mark.asyncio
@@ -886,6 +1074,16 @@ def test_singleton_runtime_conflict_raises() -> None:
         get_runtime(RuntimeConfig(pool_size=2, max_queue_depth=4, max_requests_per_worker=5))
 
 
+def test_configure_runtime_conflict_raises() -> None:
+    # Given: the singleton runtime is already configured through configure_runtime
+    configure_runtime(RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=5))
+
+    # When: configure_runtime receives a conflicting host-level config
+    # Then: it rejects the conflicting reconfiguration request
+    with pytest.raises(RuntimeConfigConflictError):
+        configure_runtime(RuntimeConfig(pool_size=2, max_queue_depth=4, max_requests_per_worker=5))
+
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     [
@@ -906,6 +1104,16 @@ def test_explicit_runtime_overrides_are_validated(field_name: str, value: int) -
             resolve_runtime_config(max_queue_depth=value)
         else:
             resolve_runtime_config(max_requests_per_worker=value)
+
+
+def test_runtime_config_rejects_mixed_config_sources() -> None:
+    # Given: a prebuilt runtime config and an explicit override in the same call
+    config = RuntimeConfig(pool_size=1, max_queue_depth=4, max_requests_per_worker=5)
+
+    # When: resolve_runtime_config receives both configuration forms
+    # Then: it rejects the ambiguous input source
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        resolve_runtime_config(config, pool_size=2)
 
 
 def test_env_runtime_overrides_are_validated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -952,3 +1160,15 @@ def test_runtime_info_exposes_pinned_detect_secrets_version() -> None:
     assert info.detect_secrets_version == version("detect-secrets")
     assert "GitHubTokenDetector" in info.available_plugin_names
     assert info.default_plugin_names == info.available_plugin_names
+
+
+def test_runtime_does_not_start_workers_before_first_scan() -> None:
+    # Given: a newly initialized runtime with multiple worker slots
+    runtime = get_runtime(RuntimeConfig(pool_size=2, max_queue_depth=4, max_requests_per_worker=10))
+    assert runtime._service is not None
+
+    # When: no scan has been submitted yet
+    slot_processes = [slot.process for slot in runtime._service._worker_slots]
+
+    # Then: every worker slot is still empty because startup is lazy
+    assert slot_processes == [None, None]
