@@ -1,4 +1,4 @@
-.PHONY: sync lint lint-fix typecheck test build check
+.PHONY: sync lint lint-fix typecheck test build check benchmark soak
 
 sync:
 	uv sync
@@ -22,3 +22,8 @@ build:
 
 check: lint typecheck test build
 
+benchmark:
+	uv run python scripts/benchmark_runtime.py $(BENCHMARK_ARGS)
+
+soak:
+	uv run python scripts/soak_runtime.py $(SOAK_ARGS)

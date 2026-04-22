@@ -5,6 +5,8 @@
 1. Install `uv`.
 2. Run `make sync`.
 3. Run `make check` before opening a pull request.
+4. For runtime lifecycle or default-tuning changes, run `make benchmark` and a short `make soak`
+   pass locally. These harnesses are intentionally non-CI.
 
 ## CI coverage
 
