@@ -20,5 +20,6 @@
 
 ## Release model
 
-- Pushes to `main` run semantic-release.
+- Releases are kicked off manually from the GitHub Actions UI with the `Release` workflow.
+- Dispatch the workflow from `main`; the workflow fails fast if it is started from any other ref.
 - semantic-release computes the next version from Conventional Commits, creates the tag and GitHub release, and uploads built artifacts to PyPI through GitHub Actions trusted publishing.
