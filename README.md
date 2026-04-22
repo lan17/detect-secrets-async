@@ -87,7 +87,7 @@ configure_runtime(RuntimeConfig(pool_size=8, max_queue_depth=32, max_requests_pe
 
 ## Lifecycle Helpers
 
-- `get_runtime(...)` / `init_runtime(...)`: return the shared runtime
+- `get_runtime(...)`: return the shared runtime, creating it on first access
 - `configure_runtime(...)`: pin or confirm host-level settings
 - `shutdown_runtime()`: async teardown for tests and long-lived hosts
 - `reset_runtime_for_tests()`: async reset helper

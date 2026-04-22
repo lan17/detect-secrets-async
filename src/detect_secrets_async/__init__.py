@@ -15,7 +15,6 @@ from ._runtime import (
     configure_runtime,
     get_runtime,
     get_runtime_info,
-    init_runtime,
     reset_runtime_for_tests,
     shutdown_runtime,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "configure_runtime",
     "get_runtime",
     "get_runtime_info",
-    "init_runtime",
     "reset_runtime_for_tests",
     "shutdown_runtime",
 ]

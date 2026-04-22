@@ -679,23 +679,6 @@ def get_runtime(
         return _RUNTIME
 
 
-def init_runtime(
-    config: RuntimeConfig | None = None,
-    *,
-    pool_size: int | None = None,
-    max_queue_depth: int | None = None,
-    max_requests_per_worker: int | None = None,
-) -> DetectSecretsRuntime:
-    """Alias for get_runtime()."""
-
-    return get_runtime(
-        config,
-        pool_size=pool_size,
-        max_queue_depth=max_queue_depth,
-        max_requests_per_worker=max_requests_per_worker,
-    )
-
-
 def configure_runtime(
     config: RuntimeConfig | None = None,
     *,

@@ -41,3 +41,16 @@ def test_version_falls_back_when_package_metadata_is_missing(
         assert reimported_module.__version__ == "0.0.0"
     finally:
         sys.modules[module_name] = original_module
+
+
+def test_package_does_not_export_init_runtime() -> None:
+    # Given: the public detect-secrets-async package module
+    package_module = detect_secrets_async
+
+    # When: callers inspect the public runtime lifecycle API
+    exported_names = set(package_module.__all__)
+
+    # Then: only get_runtime remains as the runtime acquisition entry point
+    assert "get_runtime" in exported_names
+    assert "init_runtime" not in exported_names
+    assert not hasattr(package_module, "init_runtime")
