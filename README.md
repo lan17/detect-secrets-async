@@ -11,9 +11,6 @@ synchronous scanner in a bounded pool of long-lived subprocess workers so hosts 
 scans with real timeouts, isolated per-request plugin configuration, and cross-request
 concurrency.
 
-The package is intentionally generic — it has no knowledge of Agent Control, evaluator result
-mapping, payload normalization, or JSON Pointer metadata.
-
 ## Install
 
 ```bash
