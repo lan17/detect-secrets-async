@@ -299,13 +299,13 @@ async def test_queue_full_is_rejected_immediately(
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(script)))
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
 
-    task_one = asyncio.create_task(runtime.scan(_request("one", timeout_ms=1_000)))
-    task_two = asyncio.create_task(runtime.scan(_request("two", timeout_ms=1_000)))
+    task_one = asyncio.create_task(runtime.scan(_request("one", timeout_ms=5_000)))
+    task_two = asyncio.create_task(runtime.scan(_request("two", timeout_ms=5_000)))
     await asyncio.sleep(0.05)
 
     # When: a third request arrives while the queue is already saturated
     with pytest.raises(RuntimeScanError) as exc_info:
-        await runtime.scan(_request("three", timeout_ms=1_000))
+        await runtime.scan(_request("three", timeout_ms=5_000))
 
     # Then: the runtime rejects it with a queue-full error and drains request bookkeeping
     assert exc_info.value.code == ScanFailureCode.QUEUE_FULL
@@ -337,7 +337,7 @@ async def test_timeout_while_waiting_for_worker_is_queue_timeout(
     _patch_worker_command(monkeypatch, lambda: (sys.executable, str(script)))
     runtime = get_runtime(RuntimeConfig(pool_size=1, max_queue_depth=1, max_requests_per_worker=10))
 
-    task_one = asyncio.create_task(runtime.scan(_request("one", timeout_ms=1_000)))
+    task_one = asyncio.create_task(runtime.scan(_request("one", timeout_ms=5_000)))
     await asyncio.sleep(0.05)
 
     # When: a queued request expires before any worker becomes available
