@@ -42,6 +42,92 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Usage
+
+### Narrow the detector set
+
+Pick specific plugins when you know what you're looking for and want to avoid noise from the
+entropy and keyword detectors. Class names — not `secret_type` strings — go in here.
+
+```python
+from detect_secrets_async import ScanConfig, ScanRequest, get_runtime
+
+runtime = get_runtime()
+
+result = await runtime.scan(
+    ScanRequest(
+        content=payload,
+        timeout_ms=5_000,
+        config=ScanConfig(enabled_plugins=("GitHubTokenDetector", "AWSKeyDetector")),
+    )
+)
+```
+
+Omit `enabled_plugins` (or pass `None`) to use the upstream default plugin set.
+
+### Validate plugin names ahead of submission
+
+If plugin selection is user-configurable, use `get_runtime_info()` to check names without running
+a scan:
+
+```python
+from detect_secrets_async import get_runtime_info
+
+available = set(get_runtime_info().available_plugin_names)
+requested = {"GitHubTokenDetector", "AWSKeyDetector", "UnknownPlugin"}
+
+unknown = requested - available
+if unknown:
+    raise ValueError(f"unknown detect-secrets plugins: {sorted(unknown)}")
+```
+
+### Scan many payloads concurrently
+
+`scan()` is safe to call from many tasks at once. The runtime saturates the pool up to
+`pool_size` workers and falls back to the FIFO queue beyond that, so you can drive it with
+`asyncio.gather` without any caller-side fan-out logic.
+
+```python
+import asyncio
+
+from detect_secrets_async import ScanRequest, get_runtime
+
+runtime = get_runtime()
+
+results = await asyncio.gather(
+    *(runtime.scan(ScanRequest(content=p, timeout_ms=5_000)) for p in payloads)
+)
+total_findings = sum(result.findings_count for result in results)
+```
+
+### Handle failure codes
+
+Scan failures raise `RuntimeScanError` with a stable `ScanFailureCode`. Branch on the code, not
+the message:
+
+```python
+from detect_secrets_async import (
+    RuntimeScanError,
+    ScanFailureCode,
+    ScanRequest,
+    get_runtime,
+)
+
+runtime = get_runtime()
+
+try:
+    result = await runtime.scan(ScanRequest(content=payload, timeout_ms=1_000))
+except RuntimeScanError as exc:
+    if exc.code in {ScanFailureCode.QUEUE_FULL, ScanFailureCode.QUEUE_TIMEOUT}:
+        # backpressure — back off and retry
+        ...
+    elif exc.code == ScanFailureCode.WORKER_TIMEOUT:
+        # payload too heavy for the configured timeout
+        ...
+    else:
+        raise
+```
+
 ## How it works
 
 One shared runtime per host process. It owns:
