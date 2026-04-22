@@ -1,9 +1,7 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,6 +21,13 @@ jobs:
       dist-artifact: dist
 
     steps:
+      - name: Validate release branch
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "Release workflow must be dispatched from main." >&2
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
